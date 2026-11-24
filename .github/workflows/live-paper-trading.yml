@@ -1,0 +1,97 @@
+name: Live paper trading
+
+# Runs every day just after the daily BTC candle closes (00:00 UTC).
+# Fetches fresh data, retrains the model weekly (Sundays), paper-trades the
+# newest candle, commits the updated account to `live/`, and redeploys the
+# dashboard website to GitHub Pages.
+on:
+  push:
+    branches: [main]
+    paths: ["src/**", ".github/workflows/live-paper-trading.yml"]
+  schedule:
+    - cron: "15 0 * * *"
+  workflow_dispatch:
+    inputs:
+      force_retrain:
+        description: "Retrain the model now"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: live-paper-trading
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: pip install -e .
+
+      - name: Fetch latest BTC-USD daily candles
+        run: btcbot fetch --granularity 1d --days 3650 --out data/btc_1d.csv
+
+      - name: Retrain (weekly, first run, or on request)
+        run: |
+          if [ ! -f live/model.joblib ] || [ "${{ inputs.force_retrain }}" = "true" ] || [ "$(date -u +%u)" = "7" ]; then
+            btcbot train --data data/btc_1d.csv --model gbm --name live-latest \
+              --model-out live/model.joblib
+            cp reports/live-latest/comparison.csv live/last_backtest.csv
+            cp reports/live-latest/equity_gbm.png live/last_backtest.png
+            cp reports/live-latest/curve_gbm.csv live/last_backtest_curve.csv
+          else
+            echo "Not a retraining day -- keeping the current model."
+          fi
+
+      - name: Paper-trade the newest closed candle
+        run: |
+          btcbot paper --model live/model.joblib --data data/btc_1d.csv \
+            --state live/state.json --log live/trades.csv
+
+      - name: Update live report
+        run: |
+          btcbot live-report --data data/btc_1d.csv --state live/state.json \
+            --log live/trades.csv --out live
+
+      - name: Build dashboard website
+        run: |
+          btcbot site --data data/btc_1d.csv --state live/state.json --log live/trades.csv \
+            --model live/model.joblib --curve live/last_backtest_curve.csv --out _site
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Commit results
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add live/
+          if git diff --cached --quiet; then
+            echo "Nothing new to commit."
+          else
+            git commit -m "bot: paper-trading update $(date -u +%Y-%m-%d)"
+            git push
+          fi
+
+  deploy:
+    needs: run
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

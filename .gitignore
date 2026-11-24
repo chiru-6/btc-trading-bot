@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.DS_Store
+
+# Generated artifacts (regenerate with the CLI)
+data/*.csv
+models/*.joblib
+paper/
+reports/*
+!reports/sample/
+_site/
